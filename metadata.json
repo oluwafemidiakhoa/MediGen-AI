@@ -1,0 +1,7 @@
+{
+  "name": "MediGen AI",
+  "description": "Advanced AI medical imaging tool using Gemini 2.5 Flash. Generate anatomical renders, medical illustrations, and visualize pathologies from sketches or descriptions.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
