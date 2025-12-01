@@ -1,12 +1,14 @@
+
 import React from 'react';
 import { AnatomicalStructure } from '../types';
 
 interface StructureAnalysisProps {
   structures: AnatomicalStructure[];
   isLoading: boolean;
+  onHoverStructure?: (index: number | null) => void;
 }
 
-export const StructureAnalysis: React.FC<StructureAnalysisProps> = ({ structures, isLoading }) => {
+export const StructureAnalysis: React.FC<StructureAnalysisProps> = ({ structures, isLoading, onHoverStructure }) => {
   if (isLoading) {
     return (
       <div className="h-full flex flex-col items-center justify-center p-8 space-y-4 border border-cyan-500/20 rounded-2xl bg-slate-900/50 backdrop-blur-sm min-h-[300px]">
@@ -30,7 +32,12 @@ export const StructureAnalysis: React.FC<StructureAnalysisProps> = ({ structures
       
       <div className="p-4 space-y-3 max-h-[400px] overflow-y-auto custom-scrollbar">
         {structures.map((item, idx) => (
-          <div key={idx} className="group relative bg-slate-800/50 border border-slate-700 hover:border-cyan-500/50 rounded-lg p-3 transition-all duration-300 hover:bg-slate-800">
+          <div 
+            key={idx} 
+            className="group relative bg-slate-800/50 border border-slate-700 hover:border-cyan-500/50 rounded-lg p-3 transition-all duration-300 hover:bg-slate-800 cursor-pointer"
+            onMouseEnter={() => onHoverStructure && onHoverStructure(idx)}
+            onMouseLeave={() => onHoverStructure && onHoverStructure(null)}
+          >
             <div className="flex justify-between items-start mb-1">
               <span className="text-cyan-300 font-bold text-sm tracking-wide">{item.name}</span>
               {item.confidence && (

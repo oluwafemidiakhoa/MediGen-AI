@@ -1,3 +1,4 @@
+
 import React, { useRef, useEffect, useState } from 'react';
 import { VRScene } from './VRScene';
 
@@ -31,6 +32,16 @@ export const HoloViewer: React.FC<HoloViewerProps> = ({ videoUrl }) => {
   const handleMouseLeave = () => {
     setRotateX(0);
     setRotateY(0);
+  };
+
+  const handleDownload = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const a = document.createElement('a');
+    a.href = videoUrl;
+    a.download = `medigen-holo-${Date.now()}.mp4`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
   if (showVR) {
@@ -92,18 +103,28 @@ export const HoloViewer: React.FC<HoloViewerProps> = ({ videoUrl }) => {
       {/* Container Glow */}
       <div className="absolute inset-0 pointer-events-none shadow-[inset_0_0_100px_rgba(6,182,212,0.1)] rounded-2xl"></div>
 
-      {/* VR Toggle Button */}
-      <button 
-        onClick={() => setShowVR(true)}
-        className="absolute top-4 right-4 z-40 bg-black/60 backdrop-blur-md border border-cyan-500/50 text-cyan-400 p-2 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity hover:bg-cyan-900/50"
-        title="View in VR"
-      >
-        <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-        </svg>
-        <span className="sr-only">VR Mode</span>
-      </button>
+      {/* Control Buttons */}
+      <div className="absolute top-4 right-4 z-40 flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button 
+          onClick={() => setShowVR(true)}
+          className="bg-black/60 backdrop-blur-md border border-cyan-500/50 text-cyan-400 p-2 rounded-lg hover:bg-cyan-900/50"
+          title="View in VR"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+        </button>
+        <button 
+          onClick={handleDownload}
+          className="bg-black/60 backdrop-blur-md border border-cyan-500/50 text-cyan-400 p-2 rounded-lg hover:bg-cyan-900/50"
+          title="Download MP4"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 };

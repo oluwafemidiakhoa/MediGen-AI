@@ -92,3 +92,23 @@ export interface SurgicalPlan {
   steps: string[];
   risks: string[];
 }
+
+export interface MedicalResearch {
+  topic: string;
+  summary: string;
+  citations: {
+    title: string;
+    source: string;
+    url: string;
+  }[];
+  treatmentProtocols: string[];
+}
+
+export interface DifferentialDiagnosis {
+  condition: string;
+  probability: number; // 0-100
+  reasoning: string;
+  color: string; // Hex for UI
+}
+
+export type Timeframe = 'ORIGINAL' | '3_MONTHS' | '6_MONTHS' | '1_YEAR';

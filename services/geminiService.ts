@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, Type, Modality } from "@google/genai";
-import { ChatMessage, AnatomicalStructure, RadiologyReport, SurgicalPlan } from "../types";
+import { ChatMessage, AnatomicalStructure, RadiologyReport, SurgicalPlan, MedicalResearch, DifferentialDiagnosis, Timeframe } from "../types";
 
 // Helper to get fresh client instance
 const getAiClient = () => new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -51,6 +51,16 @@ export const playAudio = async (base64Audio: string) => {
     const source = outputAudioContext.createBufferSource();
     source.buffer = audioBuffer;
     source.connect(outputNode);
+    
+    // Cleanup on end to prevent memory leaks/context limits
+    source.onended = () => {
+      source.disconnect();
+      outputNode.disconnect();
+      if (outputAudioContext.state !== 'closed') {
+        outputAudioContext.close();
+      }
+    };
+
     source.start();
   } catch (e) {
     console.error("Audio playback error:", e);
@@ -382,6 +392,52 @@ export const generateSurgicalPlan = async (
   }
 };
 
+// Perform PubMed/Medical Research
+export const performMedicalResearch = async (
+  topic: string
+): Promise<MedicalResearch> => {
+  try {
+    const ai = getAiClient();
+    
+    // We use googleSearch to ground the results in real medical literature.
+    // NOTE: responseMimeType is not supported with tools, so we prompt for JSON manually.
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `Search PubMed and major medical databases for recent papers, clinical trials, and standard treatment protocols regarding: "${topic}".
+                 Summarize the key findings, list 3-4 top citations with their sources (e.g. NEJM, Lancet, PubMed), and outline current treatment protocols.
+                 
+                 IMPORTANT: You MUST return the result as a raw JSON object (no markdown formatting, no code blocks) matching this structure:
+                 {
+                   "topic": "string",
+                   "summary": "string",
+                   "citations": [
+                     { "title": "string", "source": "string", "url": "string" }
+                   ],
+                   "treatmentProtocols": ["string", "string"]
+                 }`,
+      config: {
+        tools: [{googleSearch: {}}],
+        // responseMimeType and responseSchema removed to avoid 400 error
+      }
+    });
+    
+    let text = response.text || "{}";
+    
+    // Clean up potential markdown code blocks if the model ignores the "no markdown" instruction
+    if (text.includes("```json")) {
+      text = text.replace(/```json\n?|\n?```/g, "").trim();
+    } else if (text.includes("```")) {
+      text = text.replace(/```\n?|\n?```/g, "").trim();
+    }
+    
+    return JSON.parse(text) as MedicalResearch;
+    
+  } catch (error) {
+    console.error("Research error:", error);
+    throw error;
+  }
+};
+
 // Text to Speech
 export const generateAudioBriefing = async (text: string) => {
   try {
@@ -406,5 +462,103 @@ export const generateAudioBriefing = async (text: string) => {
   } catch (error) {
     console.error("Error generating audio:", error);
     throw error;
+  }
+};
+
+// --- NEW FEATURES ---
+
+// Generate Heatmap Mask
+export const generateAnomalyHeatmap = async (
+  base64Image: string,
+  mimeType: string
+): Promise<string> => {
+  try {
+    const prompt = `Generate a medical heatmap overlay for this image. 
+      Keep the background completely BLACK. 
+      Identify areas of pathology, inflammation, fracture, or anomaly and color them active glowing ORANGE and RED. 
+      Healthy tissue should be black. 
+      The output should be a mask that can be overlaid on the original image.`;
+      
+    return await editImage(base64Image, mimeType, prompt);
+  } catch (error) {
+    console.error("Error generating heatmap:", error);
+    throw error;
+  }
+};
+
+// Predictive Progression (Time Travel)
+export const generateProgressionPreview = async (
+  base64Image: string,
+  mimeType: string,
+  timeframe: Timeframe,
+  conditionDescription: string
+): Promise<string> => {
+  try {
+    let timeframePrompt = "";
+    if (timeframe === '3_MONTHS') timeframePrompt = "showing disease progression after 3 months without treatment";
+    if (timeframe === '6_MONTHS') timeframePrompt = "showing advanced disease progression after 6 months";
+    if (timeframe === '1_YEAR') timeframePrompt = "showing chronic long-term damage after 1 year";
+
+    const prompt = `Medical predictive imaging. Modify this scan to simulate the future state of the anatomy, ${timeframePrompt}. 
+      Condition: ${conditionDescription}. 
+      Maintain the exact same view, style, and alignment as the original. 
+      Show realistic pathological evolution (e.g., tumor growth, bone degeneration, spreading infection).`;
+
+    return await editImage(base64Image, mimeType, prompt);
+  } catch (error) {
+    console.error("Error generating progression:", error);
+    throw error;
+  }
+};
+
+// Differential Diagnosis (Dr. House Mode)
+export const getDifferentialDiagnosis = async (
+  base64Image: string,
+  mimeType: string,
+  findings: string
+): Promise<DifferentialDiagnosis[]> => {
+  try {
+    const ai = getAiClient();
+    const cleanBase64 = base64Image.split(',')[1] || base64Image;
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              data: cleanBase64,
+              mimeType: mimeType,
+            },
+          },
+          {
+            text: `Based on the image and these findings: "${findings}", provide a Differential Diagnosis.
+                   List the top 3 most likely competing conditions.
+                   For each, provide a probability score (0-100), a short reasoning, and a UI color code (Hex).`,
+          },
+        ],
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              condition: { type: Type.STRING },
+              probability: { type: Type.NUMBER },
+              reasoning: { type: Type.STRING },
+              color: { type: Type.STRING }
+            },
+            required: ["condition", "probability", "reasoning", "color"]
+          }
+        }
+      }
+    });
+
+    return JSON.parse(response.text) as DifferentialDiagnosis[];
+  } catch (error) {
+    console.error("Error generating differential diagnosis:", error);
+    return [];
   }
 };

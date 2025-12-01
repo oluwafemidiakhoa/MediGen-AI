@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
 import { ImageCompare } from './components/ImageCompare';
@@ -13,8 +13,12 @@ import { SmartLabelOverlay } from './components/SmartLabelOverlay';
 import { MedicalChat } from './components/MedicalChat';
 import { RadiologyReport } from './components/RadiologyReport';
 import { SurgicalPlan } from './components/SurgicalPlan';
-import { AppStatus, ImageFile, ImageAdjustments, AppMode, AnatomicalStructure, RadiologyReport as RadiologyReportType, SurgicalPlan as SurgicalPlanType } from './types';
-import { editImage, analyzeImage, generateMedicalVideo, generateRadiologyReport, generateHealthyReference, generateSurgicalPlan } from './services/geminiService';
+import { ResearchPanel } from './components/ResearchPanel';
+import { Magnifier } from './components/Magnifier';
+import { TimelineSlider } from './components/TimelineSlider';
+import { DifferentialPanel } from './components/DifferentialPanel';
+import { AppStatus, ImageFile, ImageAdjustments, AppMode, AnatomicalStructure, RadiologyReport as RadiologyReportType, SurgicalPlan as SurgicalPlanType, MedicalResearch, DifferentialDiagnosis, Timeframe } from './types';
+import { editImage, analyzeImage, generateMedicalVideo, generateRadiologyReport, generateHealthyReference, generateSurgicalPlan, performMedicalResearch, generateAnomalyHeatmap, generateProgressionPreview, getDifferentialDiagnosis } from './services/geminiService';
 
 // Removed conflicting global declaration. Using local interface and casting instead.
 interface AIStudioClient {
@@ -38,13 +42,20 @@ const App: React.FC = () => {
   const [healthyImageUrl, setHealthyImageUrl] = useState<string | null>(null); // For Patient Education Mode
   const [generatedVideoUrl, setGeneratedVideoUrl] = useState<string | null>(null);
   
+  // Advanced Visual Layers
+  const [heatmapUrl, setHeatmapUrl] = useState<string | null>(null);
+  const [progressionUrl, setProgressionUrl] = useState<string | null>(null);
+  
   const [prompt, setPrompt] = useState('');
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [error, setError] = useState<string | null>(null);
   
-  // Smart Labels (Coordinates)
+  // Smart Labels & Analysis
   const [showSmartLabels, setShowSmartLabels] = useState(false);
   const [structures, setStructures] = useState<AnatomicalStructure[]>([]);
+  const [focusedStructureIndex, setFocusedStructureIndex] = useState<number | null>(null);
+  const [differentialDiagnoses, setDifferentialDiagnoses] = useState<DifferentialDiagnosis[]>([]);
+  const [showDifferential, setShowDifferential] = useState(false);
   
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -56,15 +67,21 @@ const App: React.FC = () => {
   // Advanced Features
   const [report, setReport] = useState<RadiologyReportType | null>(null);
   const [surgicalPlan, setSurgicalPlan] = useState<SurgicalPlanType | null>(null);
-  const [viewMode, setViewMode] = useState<'GENERATED' | 'HEALTHY'>('GENERATED');
+  const [research, setResearch] = useState<MedicalResearch | null>(null);
+  const [viewMode, setViewMode] = useState<'GENERATED' | 'HEALTHY' | 'PROGRESSION'>('GENERATED');
+  const [activeTimeframe, setActiveTimeframe] = useState<Timeframe>('ORIGINAL');
 
-  // Image PACS Adjustments
+  // Image PACS Adjustments & Tools
+  const [activeTool, setActiveTool] = useState<'POINTER' | 'MAGNIFIER' | 'WINDOW_LEVEL' | 'HEATMAP'>('POINTER');
   const [adjustments, setAdjustments] = useState<ImageAdjustments>({
     brightness: 100,
     contrast: 100,
     invert: false,
     grayscale: false
   });
+
+  // Window/Level Drag State
+  const dragStartRef = useRef<{x: number, y: number, b: number, c: number} | null>(null);
 
   // Check API Key for Veo
   useEffect(() => {
@@ -100,12 +117,17 @@ const App: React.FC = () => {
     setGeneratedImageUrl(null);
     setGeneratedVideoUrl(null);
     setHealthyImageUrl(null);
+    setHeatmapUrl(null);
+    setProgressionUrl(null);
+    setDifferentialDiagnoses([]);
     setIsAnalyzing(true);
     setIsAnnotating(false);
     setShowSmartLabels(false);
     setViewMode('GENERATED');
+    setActiveTimeframe('ORIGINAL');
     setReport(null);
     setSurgicalPlan(null);
+    setResearch(null);
 
     try {
       if (mode === AppMode.SCAN_2D) {
@@ -115,10 +137,19 @@ const App: React.FC = () => {
         setGeneratedImageUrl(generatedImage);
         setStatus(AppStatus.SUCCESS);
 
-        // Analyze the *Generated* image (Pass 2) for better accuracy
+        // Parallel Analysis: Structures + Differential Diagnosis + Heatmap Prep
         const analysisPromise = analyzeImage(generatedImage, "image/png");
+        
+        // Kick off heatmap generation quietly in background
+        generateAnomalyHeatmap(generatedImage, "image/png").then(setHeatmapUrl).catch(e => console.log("Heatmap gen skipped", e));
+
         const analysisData = await analysisPromise;
         setStructures(analysisData);
+        
+        // Auto-run Differential Diagnosis if pathologies found
+        const findings = analysisData.map(s => s.name).join(', ');
+        getDifferentialDiagnosis(generatedImage, "image/png", findings || prompt).then(setDifferentialDiagnoses);
+
         setIsAnalyzing(false);
 
       } else {
@@ -142,6 +173,38 @@ const App: React.FC = () => {
     }
   };
 
+  const handleTimeframeChange = async (time: Timeframe) => {
+    if (!generatedImageUrl || time === activeTimeframe) return;
+    
+    setActiveTimeframe(time);
+    
+    if (time === 'ORIGINAL') {
+      setViewMode('GENERATED');
+      return;
+    }
+
+    setViewMode('PROGRESSION');
+    // If we haven't generated this progression yet, do it now
+    // NOTE: In a real app we might cache each timeframe. Here we just simple-switch.
+    setStatus(AppStatus.LOADING);
+    try {
+      const progression = await generateProgressionPreview(
+         generatedImageUrl, 
+         "image/png", 
+         time, 
+         structures.map(s => s.name).join(', ') || prompt
+      );
+      setProgressionUrl(progression);
+      setStatus(AppStatus.SUCCESS);
+    } catch(e) {
+      console.error(e);
+      setError("Failed to generate progression preview.");
+      setStatus(AppStatus.ERROR);
+      setActiveTimeframe('ORIGINAL');
+      setViewMode('GENERATED');
+    }
+  };
+
   const handleGenerateReport = async () => {
     if (!generatedImageUrl || !originalImage) return;
     setIsAnalyzing(true);
@@ -157,11 +220,14 @@ const App: React.FC = () => {
   };
 
   const handleGenerateSurgicalPlan = async () => {
-     if (!generatedImageUrl || structures.length === 0) return;
+     if (!generatedImageUrl) return;
      setIsAnalyzing(true);
      try {
-       // Create context from structures
-       const findings = structures.map(s => s.name + ': ' + s.description).join('. ');
+       // Create context from structures or prompt
+       const findings = structures.length > 0 
+           ? structures.map(s => s.name + ': ' + s.description).join('. ')
+           : prompt;
+
        const plan = await generateSurgicalPlan(generatedImageUrl, "image/png", findings);
        setSurgicalPlan(plan);
      } catch(e) {
@@ -170,6 +236,24 @@ const App: React.FC = () => {
      } finally {
        setIsAnalyzing(false);
      }
+  };
+
+  const handlePerformResearch = async () => {
+    if (structures.length === 0 && !prompt) return;
+    setIsAnalyzing(true);
+    try {
+      // Gather keywords
+      const topics = structures.map(s => s.name).slice(0, 3).join(', ');
+      const query = topics || prompt;
+      
+      const researchData = await performMedicalResearch(query);
+      setResearch(researchData);
+    } catch(e) {
+      console.error(e);
+      setError("Failed to retrieve medical research.");
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   const handlePatientEducationMode = async () => {
@@ -190,6 +274,37 @@ const App: React.FC = () => {
       setError("Failed to generate healthy reference.");
       setStatus(AppStatus.ERROR);
     }
+  };
+
+  // Window/Level Drag Handlers
+  const handleMouseDown = (e: React.MouseEvent) => {
+    if (activeTool === 'WINDOW_LEVEL') {
+      dragStartRef.current = {
+        x: e.clientX,
+        y: e.clientY,
+        b: adjustments.brightness,
+        c: adjustments.contrast
+      };
+    }
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (activeTool === 'WINDOW_LEVEL' && dragStartRef.current) {
+      const dx = e.clientX - dragStartRef.current.x;
+      const dy = e.clientY - dragStartRef.current.y;
+      
+      // Horizontal = Contrast (Window Width)
+      // Vertical = Brightness (Window Level)
+      setAdjustments(prev => ({
+        ...prev,
+        contrast: Math.min(Math.max(dragStartRef.current!.c + dx * 0.5, 0), 200),
+        brightness: Math.min(Math.max(dragStartRef.current!.b - dy * 0.5, 0), 200)
+      }));
+    }
+  };
+
+  const handleMouseUp = () => {
+    dragStartRef.current = null;
   };
 
   // Voice Command Parsing
@@ -241,6 +356,22 @@ const App: React.FC = () => {
       handleGenerateSurgicalPlan();
       return;
     }
+    if (lower.includes('research') || lower.includes('pubmed')) {
+      handlePerformResearch();
+      return;
+    }
+    if (lower.includes('magnifier') || lower.includes('zoom')) {
+      setActiveTool('MAGNIFIER');
+      return;
+    }
+    if (lower.includes('pointer')) {
+      setActiveTool('POINTER');
+      return;
+    }
+    if (lower.includes('heatmap') || lower.includes('thermal')) {
+      setActiveTool('HEATMAP');
+      return;
+    }
     if (lower.includes('back to scan') || lower.includes('original view')) {
       setViewMode('GENERATED');
       return;
@@ -257,6 +388,13 @@ const App: React.FC = () => {
     if (style.settings && Object.keys(style.settings).length > 0) {
       setAdjustments(prev => ({ ...prev, ...style.settings }));
     }
+  };
+
+  // Helper to determine which image to show
+  const getActiveDisplayImage = () => {
+    if (viewMode === 'HEALTHY' && healthyImageUrl) return healthyImageUrl;
+    if (viewMode === 'PROGRESSION' && progressionUrl) return progressionUrl;
+    return generatedImageUrl || '';
   };
 
   return (
@@ -311,6 +449,7 @@ const App: React.FC = () => {
                   setStructures([]);
                   setReport(null);
                   setSurgicalPlan(null);
+                  setResearch(null);
                 }} 
                 selectedImage={originalImage} 
               />
@@ -463,7 +602,7 @@ const App: React.FC = () => {
                   03. Visualization Output
                 </h2>
                 
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2 justify-end">
                   {/* Patient Education Mode Toggle */}
                   {generatedImageUrl && mode === AppMode.SCAN_2D && (
                      <div className="bg-slate-800 rounded-lg p-1 border border-slate-700 flex mr-2">
@@ -524,6 +663,17 @@ const App: React.FC = () => {
                   {/* Action Buttons Group */}
                    {generatedImageUrl && mode === AppMode.SCAN_2D && (
                       <div className="flex gap-2">
+                        {/* PubMed Button */}
+                        <Button
+                           variant="outline"
+                           onClick={handlePerformResearch}
+                           className="!py-1.5 !px-4 !text-xs font-mono uppercase tracking-wider flex items-center gap-2 border-purple-500/30 text-purple-300 hover:bg-purple-900/50"
+                        >
+                           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                           </svg>
+                           Research
+                        </Button>
                         <Button
                            variant="outline"
                            onClick={handleGenerateSurgicalPlan}
@@ -532,7 +682,7 @@ const App: React.FC = () => {
                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
                            </svg>
-                           Surgery Plan
+                           Plan
                         </Button>
                         <Button
                            variant="outline"
@@ -542,7 +692,7 @@ const App: React.FC = () => {
                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                            </svg>
-                           Draft Report
+                           Report
                         </Button>
                       </div>
                    )}
@@ -555,15 +705,27 @@ const App: React.FC = () => {
                 
                 {generatedImageUrl && mode === AppMode.SCAN_2D && !isAnnotating && !showSmartLabels && (
                    <div className="print:hidden">
-                      <ImageControls adjustments={adjustments} setAdjustments={setAdjustments} />
+                      <ImageControls 
+                        adjustments={adjustments} 
+                        setAdjustments={setAdjustments} 
+                        activeTool={activeTool}
+                        setActiveTool={setActiveTool}
+                      />
                    </div>
                 )}
 
-                <div className={`
-                  relative min-h-[500px] h-full rounded-2xl border bg-black/40 overflow-hidden shadow-2xl transition-all duration-500 flex flex-col
-                  ${(generatedImageUrl || generatedVideoUrl) ? 'border-cyan-500/50 shadow-[0_0_30px_rgba(6,182,212,0.15)]' : 'border-slate-800 border-dashed'}
-                  print:border-none print:shadow-none print:bg-white print:min-h-0
-                `}>
+                <div 
+                  className={`
+                    relative min-h-[500px] h-full rounded-2xl border bg-black/40 overflow-hidden shadow-2xl transition-all duration-500 flex flex-col
+                    ${(generatedImageUrl || generatedVideoUrl) ? 'border-cyan-500/50 shadow-[0_0_30px_rgba(6,182,212,0.15)]' : 'border-slate-800 border-dashed'}
+                    print:border-none print:shadow-none print:bg-white print:min-h-0
+                    ${activeTool === 'WINDOW_LEVEL' ? 'cursor-crosshair' : ''}
+                  `}
+                  onMouseDown={handleMouseDown}
+                  onMouseMove={handleMouseMove}
+                  onMouseUp={handleMouseUp}
+                  onMouseLeave={handleMouseUp}
+                >
                   
                   {/* Empty State */}
                   {!generatedImageUrl && !generatedVideoUrl && status !== AppStatus.LOADING && (
@@ -588,6 +750,9 @@ const App: React.FC = () => {
                       {viewMode === 'HEALTHY' && !healthyImageUrl && (
                         <p className="mt-8 text-green-400 font-mono text-xs animate-pulse">SYNTHESIZING HEALTHY REFERENCE MODEL...</p>
                       )}
+                      {viewMode === 'PROGRESSION' && !progressionUrl && (
+                        <p className="mt-8 text-cyan-400 font-mono text-xs animate-pulse">SIMULATING DISEASE PROGRESSION...</p>
+                      )}
                     </div>
                   )}
 
@@ -597,23 +762,51 @@ const App: React.FC = () => {
                       <div className="print:hidden h-full">
                         {isAnnotating ? (
                            <AnnotationCanvas 
-                              imageUrl={viewMode === 'HEALTHY' && healthyImageUrl ? healthyImageUrl : generatedImageUrl} 
+                              imageUrl={getActiveDisplayImage()} 
                               onSave={(newUrl) => {
                                 setGeneratedImageUrl(newUrl);
                                 setIsAnnotating(false);
                               }}
                               onCancel={() => setIsAnnotating(false)}
                            />
+                        ) : activeTool === 'MAGNIFIER' ? (
+                           <Magnifier imgUrl={getActiveDisplayImage()} />
                         ) : showSmartLabels ? (
                            <div className="relative w-full h-full">
-                              <SmartLabelOverlay structures={structures} imageUrl={generatedImageUrl} />
+                              <SmartLabelOverlay 
+                                 structures={structures} 
+                                 imageUrl={generatedImageUrl} 
+                                 focusedIndex={focusedStructureIndex}
+                              />
                            </div>
                         ) : (
-                           <ImageCompare 
-                              beforeImage={originalImage.previewUrl}
-                              afterImage={viewMode === 'HEALTHY' && healthyImageUrl ? healthyImageUrl : generatedImageUrl}
-                              adjustments={adjustments}
-                           />
+                           <div className="relative w-full h-full">
+                              <ImageCompare 
+                                beforeImage={originalImage.previewUrl}
+                                afterImage={getActiveDisplayImage()}
+                                adjustments={adjustments}
+                              />
+                              
+                              {/* Heatmap Overlay */}
+                              {activeTool === 'HEATMAP' && heatmapUrl && (
+                                <img 
+                                  src={heatmapUrl} 
+                                  className="absolute inset-0 w-full h-full object-contain pointer-events-none mix-blend-screen opacity-90 animate-pulse"
+                                  alt="Heatmap"
+                                />
+                              )}
+                           </div>
+                        )}
+                        
+                        {/* Overlay Spotlight if interaction comes from List and NOT in smart label mode (because smart label mode already renders them) */}
+                        {!showSmartLabels && focusedStructureIndex !== null && (
+                          <div className="absolute inset-0 pointer-events-none z-10">
+                             <SmartLabelOverlay 
+                               structures={structures} 
+                               imageUrl={generatedImageUrl} 
+                               focusedIndex={focusedStructureIndex}
+                            />
+                          </div>
                         )}
                       </div>
                       
@@ -641,14 +834,34 @@ const App: React.FC = () => {
                   {/* Status Footer inside Image Area */}
                   <div className="h-10 bg-slate-900 border-t border-slate-800 flex items-center justify-between px-4 text-[10px] text-slate-500 font-mono uppercase print:hidden">
                      <span>Res: {mode === AppMode.HOLO_3D ? '720p HQ' : '1024x1024'}</span>
-                     <span>Mode: {viewMode === 'HEALTHY' ? 'PATIENT EDUCATION (SYNTHETIC)' : (mode === AppMode.HOLO_3D ? 'Volumetric VR' : (isAnnotating ? 'Drawing Tool' : (showSmartLabels ? 'Smart Labels' : 'Comparison')))}</span>
+                     <span>Tool: {activeTool}</span>
+                     <span>Mode: {viewMode === 'HEALTHY' ? 'PATIENT EDUCATION (SYNTHETIC)' : viewMode === 'PROGRESSION' ? 'PREDICTIVE PROGRESSION' : (mode === AppMode.HOLO_3D ? 'Volumetric VR' : (isAnnotating ? 'Drawing Tool' : (showSmartLabels ? 'Smart Labels' : 'Comparison')))}</span>
                   </div>
                 </div>
+                
+                {/* Timeline Scrubber (Only show if we are in predictive/standard mode) */}
+                {generatedImageUrl && mode === AppMode.SCAN_2D && (
+                   <div className="mt-4 print:hidden">
+                      <TimelineSlider 
+                        activeTimeframe={activeTimeframe} 
+                        onChange={handleTimeframeChange}
+                        isLoading={status === AppStatus.LOADING}
+                      />
+                   </div>
+                )}
               </div>
 
               {/* Data Panel (Takes up 1/3) */}
               <div className="lg:col-span-1 flex flex-col gap-4">
-                  <StructureAnalysis structures={structures} isLoading={isAnalyzing} />
+                  {/* Structure List */}
+                  <StructureAnalysis 
+                    structures={structures} 
+                    isLoading={isAnalyzing} 
+                    onHoverStructure={(idx) => setFocusedStructureIndex(idx)}
+                  />
+                  
+                  {/* Differential Diagnosis (Dr. House Mode) */}
+                  <DifferentialPanel diagnoses={differentialDiagnoses} isLoading={isAnalyzing && differentialDiagnoses.length === 0} />
                   
                   {/* Placeholder for when no analysis yet */}
                   {!isAnalyzing && structures.length === 0 && (
@@ -664,14 +877,17 @@ const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Report Modal */}
+        {/* Modals & Panels */}
         {report && (
           <RadiologyReport report={report} onClose={() => setReport(null)} />
         )}
 
-        {/* Surgical Plan Modal */}
         {surgicalPlan && (
           <SurgicalPlan plan={surgicalPlan} onClose={() => setSurgicalPlan(null)} />
+        )}
+        
+        {research && (
+          <ResearchPanel research={research} onClose={() => setResearch(null)} />
         )}
 
       </main>
