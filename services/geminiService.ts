@@ -302,7 +302,8 @@ export const sendChatMessage = async (
   history: ChatMessage[],
   newMessage: string,
   base64Image: string,
-  mimeType: string
+  mimeType: string,
+  context?: string
 ): Promise<string> => {
   try {
     const ai = getAiClient();
@@ -314,11 +315,20 @@ export const sendChatMessage = async (
       parts: [{ text: msg.text }]
     }));
 
+    // Augment instruction with context if available
+    const instruction = `You are an expert medical diagnostic AI assistant. 
+    You are analyzing a specific medical image provided by the user. 
+    Answer questions about pathologies, anatomy, and potential treatments professionally.
+    Disclaimer: You are an AI, not a doctor.
+    
+    ${context ? `Use the following analysis context to inform your answers:\n${context}` : ''}
+    `;
+
     const chat = ai.chats.create({
       model: 'gemini-2.5-flash',
       history: chatHistory,
       config: {
-        systemInstruction: "You are an expert medical diagnostic AI assistant. You are analyzing a specific medical image provided by the user. Answer questions about pathologies, anatomy, and potential treatments professionally but with a disclaimer that you are an AI.",
+        systemInstruction: instruction,
       }
     });
 
@@ -400,15 +410,17 @@ export const performMedicalResearch = async (
     const ai = getAiClient();
     
     // We use googleSearch to ground the results in real medical literature.
-    // NOTE: responseMimeType is not supported with tools, so we prompt for JSON manually.
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: `Search PubMed and major medical databases for recent papers, clinical trials, and standard treatment protocols regarding: "${topic}".
-                 Summarize the key findings, list 3-4 top citations with their sources (e.g. NEJM, Lancet, PubMed), and outline current treatment protocols.
+                 Summarize the key findings, list 3-4 top citations with their sources.
                  
-                 IMPORTANT: You MUST return the result as a raw JSON object (no markdown formatting, no code blocks) matching this structure:
+                 IMPORTANT: Also extract a single, standardized medical term (MeSH or simple disease name) for this condition to be used in database searches (e.g. 'Pneumonia', 'Radial Fracture', 'Glioblastoma'). Return this as 'searchQuery'.
+
+                 You MUST return the result as a raw JSON object (no markdown formatting, no code blocks) matching this structure:
                  {
                    "topic": "string",
+                   "searchQuery": "string", 
                    "summary": "string",
                    "citations": [
                      { "title": "string", "source": "string", "url": "string" }
@@ -417,13 +429,12 @@ export const performMedicalResearch = async (
                  }`,
       config: {
         tools: [{googleSearch: {}}],
-        // responseMimeType and responseSchema removed to avoid 400 error
       }
     });
     
     let text = response.text || "{}";
     
-    // Clean up potential markdown code blocks if the model ignores the "no markdown" instruction
+    // Clean up potential markdown code blocks
     if (text.includes("```json")) {
       text = text.replace(/```json\n?|\n?```/g, "").trim();
     } else if (text.includes("```")) {
@@ -464,8 +475,6 @@ export const generateAudioBriefing = async (text: string) => {
     throw error;
   }
 };
-
-// --- NEW FEATURES ---
 
 // Generate Heatmap Mask
 export const generateAnomalyHeatmap = async (

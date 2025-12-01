@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ImageUploader } from './components/ImageUploader';
 import { Button } from './components/Button';
 import { ImageCompare } from './components/ImageCompare';
+import { SynchronizedCompare } from './components/SynchronizedCompare';
 import { StructureAnalysis } from './components/StructureAnalysis';
 import { ScanningOverlay } from './components/ScanningOverlay';
 import { VoiceInput } from './components/VoiceInput';
@@ -19,6 +20,7 @@ import { TimelineSlider } from './components/TimelineSlider';
 import { DifferentialPanel } from './components/DifferentialPanel';
 import { AppStatus, ImageFile, ImageAdjustments, AppMode, AnatomicalStructure, RadiologyReport as RadiologyReportType, SurgicalPlan as SurgicalPlanType, MedicalResearch, DifferentialDiagnosis, Timeframe } from './types';
 import { editImage, analyzeImage, generateMedicalVideo, generateRadiologyReport, generateHealthyReference, generateSurgicalPlan, performMedicalResearch, generateAnomalyHeatmap, generateProgressionPreview, getDifferentialDiagnosis } from './services/geminiService';
+import { fetchClinicalTrials, fetchMedlinePlusResources, fetchOpenFDADrugs, fetchPubMedPapers } from './services/externalMedicalAPIs';
 
 // Removed conflicting global declaration. Using local interface and casting instead.
 interface AIStudioClient {
@@ -63,6 +65,7 @@ const App: React.FC = () => {
   const [apiKeyVerified, setApiKeyVerified] = useState(false);
   const [isAnnotating, setIsAnnotating] = useState(false);
   const [showChat, setShowChat] = useState(false);
+  const [initialChatMessage, setInitialChatMessage] = useState<string>('');
   
   // Advanced Features
   const [report, setReport] = useState<RadiologyReportType | null>(null);
@@ -82,6 +85,27 @@ const App: React.FC = () => {
 
   // Window/Level Drag State
   const dragStartRef = useRef<{x: number, y: number, b: number, c: number} | null>(null);
+
+  // Keyboard Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if typing in an input
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      switch(e.key.toLowerCase()) {
+        case 'm': setActiveTool('MAGNIFIER'); break;
+        case 'h': setActiveTool('HEATMAP'); break;
+        case 'p': setActiveTool('POINTER'); break;
+        case 'w': setActiveTool('WINDOW_LEVEL'); break;
+        case 'i': setAdjustments(prev => ({...prev, invert: !prev.invert})); break;
+        case 'g': setAdjustments(prev => ({...prev, grayscale: !prev.grayscale})); break;
+        case 'l': setShowSmartLabels(prev => !prev); break;
+        case 'd': setIsAnnotating(prev => !prev); break;
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Check API Key for Veo
   useEffect(() => {
@@ -108,6 +132,35 @@ const App: React.FC = () => {
     }
   };
 
+  const handleLoadDemo = async () => {
+    setStatus(AppStatus.LOADING);
+    try {
+      // Fetch a sample Chest X-Ray
+      const response = await fetch('https://upload.wikimedia.org/wikipedia/commons/thumb/a/a1/Normal_posteroanterior_%28PA%29_chest_radiograph_%28X-ray%29.jpg/600px-Normal_posteroanterior_%28PA%29_chest_radiograph_%28X-ray%29.jpg');
+      const blob = await response.blob();
+      const file = new File([blob], "demo_chest_xray.jpg", { type: "image/jpeg" });
+      
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        if (e.target?.result) {
+          setOriginalImage({
+            file,
+            previewUrl: URL.createObjectURL(file),
+            base64: e.target.result as string,
+            mimeType: "image/jpeg"
+          });
+          setPrompt("Analyze this chest X-ray for any potential consolidation, pneumothorax, or cardiomegaly.");
+          setStatus(AppStatus.IDLE);
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (e) {
+      console.error("Demo load failed", e);
+      setError("Failed to load demo image.");
+      setStatus(AppStatus.ERROR);
+    }
+  };
+
   const handleGenerate = async () => {
     if (!originalImage || !prompt.trim()) return;
 
@@ -130,7 +183,7 @@ const App: React.FC = () => {
     setResearch(null);
 
     try {
-      if (mode === AppMode.SCAN_2D) {
+      if (mode === AppMode.SCAN_2D || mode === AppMode.SYNC_COMPARE) {
         // 2D Generation
         const imagePromise = editImage(originalImage.base64, originalImage.mimeType, prompt);
         const generatedImage = await imagePromise;
@@ -185,7 +238,6 @@ const App: React.FC = () => {
 
     setViewMode('PROGRESSION');
     // If we haven't generated this progression yet, do it now
-    // NOTE: In a real app we might cache each timeframe. Here we just simple-switch.
     setStatus(AppStatus.LOADING);
     try {
       const progression = await generateProgressionPreview(
@@ -210,7 +262,8 @@ const App: React.FC = () => {
     setIsAnalyzing(true);
     try {
       const reportData = await generateRadiologyReport(generatedImageUrl, "image/png", prompt);
-      setReport(reportData);
+      // Attach the generated image to the report for visual export
+      setReport({ ...reportData, imageUrl: generatedImageUrl });
     } catch (e) {
       console.error(e);
       setError("Failed to generate report.");
@@ -238,16 +291,59 @@ const App: React.FC = () => {
      }
   };
 
+  const handleRefineResearch = async (manualTerm: string) => {
+    setIsAnalyzing(true);
+    try {
+      const [trials, resources, drugs, papers] = await Promise.all([
+        fetchClinicalTrials(manualTerm),
+        fetchMedlinePlusResources(manualTerm),
+        fetchOpenFDADrugs(manualTerm),
+        fetchPubMedPapers(manualTerm)
+      ]);
+
+      setResearch(prev => prev ? ({
+        ...prev,
+        searchQuery: manualTerm,
+        clinicalTrials: trials,
+        patientResources: resources,
+        drugLabels: drugs,
+        pubMedPapers: papers
+      }) : null);
+
+    } catch(e) {
+      console.error("Refinement failed", e);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
   const handlePerformResearch = async () => {
     if (structures.length === 0 && !prompt) return;
     setIsAnalyzing(true);
     try {
-      // Gather keywords
-      const topics = structures.map(s => s.name).slice(0, 3).join(', ');
-      const query = topics || prompt;
+      // Gather initial context
+      const topics = structures.length > 0 ? structures.map(s => s.name).slice(0, 3).join(', ') : prompt;
       
-      const researchData = await performMedicalResearch(query);
-      setResearch(researchData);
+      const researchData = await performMedicalResearch(topics);
+      
+      const searchTerm = researchData.searchQuery || researchData.topic || topics.split(',')[0];
+      
+      const [trials, resources, drugs, papers] = await Promise.all([
+        fetchClinicalTrials(searchTerm),
+        fetchMedlinePlusResources(searchTerm),
+        fetchOpenFDADrugs(searchTerm),
+        fetchPubMedPapers(searchTerm)
+      ]);
+      
+      setResearch({
+        ...researchData,
+        searchQuery: searchTerm, 
+        clinicalTrials: trials,
+        patientResources: resources,
+        drugLabels: drugs,
+        pubMedPapers: papers
+      });
+
     } catch(e) {
       console.error(e);
       setError("Failed to retrieve medical research.");
@@ -276,6 +372,11 @@ const App: React.FC = () => {
     }
   };
 
+  const handleAskAboutStructure = (name: string) => {
+    setInitialChatMessage(`What can you tell me about the ${name} visible in this scan?`);
+    setShowChat(true);
+  };
+
   // Window/Level Drag Handlers
   const handleMouseDown = (e: React.MouseEvent) => {
     if (activeTool === 'WINDOW_LEVEL') {
@@ -293,8 +394,6 @@ const App: React.FC = () => {
       const dx = e.clientX - dragStartRef.current.x;
       const dy = e.clientY - dragStartRef.current.y;
       
-      // Horizontal = Contrast (Window Width)
-      // Vertical = Brightness (Window Level)
       setAdjustments(prev => ({
         ...prev,
         contrast: Math.min(Math.max(dragStartRef.current!.c + dx * 0.5, 0), 200),
@@ -311,73 +410,13 @@ const App: React.FC = () => {
   const handleVoiceTranscript = (text: string) => {
     const lower = text.toLowerCase();
     
-    // Command Parsing
-    if (lower.includes('invert')) {
-      setAdjustments(prev => ({ ...prev, invert: !prev.invert }));
-      return;
-    }
-    if (lower.includes('grayscale') || lower.includes('black and white')) {
-      setAdjustments(prev => ({ ...prev, grayscale: !prev.grayscale }));
-      return;
-    }
-    if (lower.includes('reset')) {
-      setAdjustments({ brightness: 100, contrast: 100, invert: false, grayscale: false });
-      return;
-    }
-    if (lower.includes('enhance') || lower.includes('brightness up')) {
-      setAdjustments(prev => ({ ...prev, brightness: Math.min(prev.brightness + 10, 150) }));
-      return;
-    }
-    if (lower.includes('darken') || lower.includes('brightness down')) {
-      setAdjustments(prev => ({ ...prev, brightness: Math.max(prev.brightness - 10, 50) }));
-      return;
-    }
-    if (lower.includes('contrast up')) {
-      setAdjustments(prev => ({ ...prev, contrast: Math.min(prev.contrast + 10, 150) }));
-      return;
-    }
-    if (lower.includes('generate report') || lower.includes('create report')) {
-      handleGenerateReport();
-      return;
-    }
-    if (lower.includes('labels') || lower.includes('show labels')) {
-      setShowSmartLabels(true);
-      return;
-    }
-    if (lower.includes('hide labels')) {
-      setShowSmartLabels(false);
-      return;
-    }
-    if (lower.includes('patient mode') || lower.includes('healthy')) {
-      handlePatientEducationMode();
-      return;
-    }
-    if (lower.includes('surgical') || lower.includes('plan')) {
-      handleGenerateSurgicalPlan();
-      return;
-    }
-    if (lower.includes('research') || lower.includes('pubmed')) {
-      handlePerformResearch();
-      return;
-    }
-    if (lower.includes('magnifier') || lower.includes('zoom')) {
-      setActiveTool('MAGNIFIER');
-      return;
-    }
-    if (lower.includes('pointer')) {
-      setActiveTool('POINTER');
-      return;
-    }
-    if (lower.includes('heatmap') || lower.includes('thermal')) {
-      setActiveTool('HEATMAP');
-      return;
-    }
-    if (lower.includes('back to scan') || lower.includes('original view')) {
-      setViewMode('GENERATED');
-      return;
-    }
-
-    // Default: Append text to prompt
+    if (lower.includes('invert')) { setAdjustments(prev => ({ ...prev, invert: !prev.invert })); return; }
+    if (lower.includes('grayscale')) { setAdjustments(prev => ({ ...prev, grayscale: !prev.grayscale })); return; }
+    if (lower.includes('reset')) { setAdjustments({ brightness: 100, contrast: 100, invert: false, grayscale: false }); return; }
+    if (lower.includes('report')) { handleGenerateReport(); return; }
+    if (lower.includes('labels')) { setShowSmartLabels(true); return; }
+    if (lower.includes('hide')) { setShowSmartLabels(false); return; }
+    
     setPrompt(prev => prev ? prev + ' ' + text : text);
   };
 
@@ -390,22 +429,35 @@ const App: React.FC = () => {
     }
   };
 
-  // Helper to determine which image to show
   const getActiveDisplayImage = () => {
     if (viewMode === 'HEALTHY' && healthyImageUrl) return healthyImageUrl;
     if (viewMode === 'PROGRESSION' && progressionUrl) return progressionUrl;
     return generatedImageUrl || '';
   };
 
+  // Build Context for Chat
+  const getChatContext = () => {
+    let context = "";
+    if (report) {
+       context += `RADIOLOGY REPORT CONTEXT:\nFindings: ${report.findings.join(', ')}\nImpression: ${report.impression}\n\n`;
+    }
+    if (research) {
+       context += `RESEARCH CONTEXT:\nTopic: ${research.topic}\nSummary: ${research.summary}\nProtocols: ${research.treatmentProtocols.join(', ')}\n`;
+    }
+    if (differentialDiagnoses.length > 0) {
+       context += `DIFFERENTIAL DIAGNOSIS:\n${differentialDiagnoses.map(d => `${d.condition} (${d.probability}%)`).join(', ')}`;
+    }
+    return context;
+  };
+
   return (
     <div className="min-h-screen bg-[#0b1120] text-slate-200 selection:bg-cyan-500/30 overflow-x-hidden font-sans print:bg-white print:text-black">
-      {/* Background Decor (Hide in Print) */}
+      {/* Background Decor */}
       <div className="fixed inset-0 pointer-events-none overflow-hidden print:hidden">
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full h-[500px] bg-cyan-900/10 blur-[100px] rounded-full" />
         <div className="absolute bottom-0 right-0 w-[800px] h-[800px] bg-teal-900/10 blur-[120px] rounded-full" />
       </div>
 
-      {/* Header */}
       <header className="border-b border-cyan-900/30 bg-[#0b1120]/80 backdrop-blur-xl sticky top-0 z-50 print:relative print:border-b-2 print:border-black print:bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-18 flex items-center justify-between py-4">
           <div className="flex items-center gap-4">
@@ -432,10 +484,7 @@ const App: React.FC = () => {
       <main className="max-w-[1400px] mx-auto px-4 sm:px-6 lg:px-8 py-8 relative z-10 print:py-0">
         <div className="grid lg:grid-cols-12 gap-8 items-start print:block">
           
-          {/* Left Column: Input Panel (4 cols) - Hide on Print */}
           <div className="lg:col-span-4 space-y-6 print:hidden">
-            
-            {/* Step 1: Upload */}
             <div className="bg-slate-900/50 rounded-2xl border border-slate-800 p-5 shadow-xl">
               <h2 className="text-sm font-bold text-cyan-400 uppercase tracking-widest mb-4 flex items-center gap-2">
                 <span className="w-2 h-2 bg-cyan-500 rounded-sm"></span>
@@ -451,11 +500,11 @@ const App: React.FC = () => {
                   setSurgicalPlan(null);
                   setResearch(null);
                 }} 
-                selectedImage={originalImage} 
+                selectedImage={originalImage}
+                onLoadDemo={handleLoadDemo} 
               />
             </div>
 
-            {/* Step 2: Controls */}
             <div className="bg-slate-900/50 rounded-2xl border border-slate-800 p-5 shadow-xl space-y-5">
               <div className="flex justify-between items-center">
                  <h2 className="text-sm font-bold text-cyan-400 uppercase tracking-widest flex items-center gap-2">
@@ -467,11 +516,10 @@ const App: React.FC = () => {
                 )}
               </div>
 
-              {/* Mode Selection */}
               <div className="grid grid-cols-2 gap-2 p-1 bg-slate-800 rounded-xl border border-slate-700">
                 <button
                   onClick={() => setMode(AppMode.SCAN_2D)}
-                  className={`py-2 px-3 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${mode === AppMode.SCAN_2D ? 'bg-cyan-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
+                  className={`py-2 px-3 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${mode === AppMode.SCAN_2D || mode === AppMode.SYNC_COMPARE ? 'bg-cyan-600 text-white shadow-lg' : 'text-slate-400 hover:text-white'}`}
                 >
                   2D Scan
                 </button>
@@ -483,7 +531,6 @@ const App: React.FC = () => {
                 </button>
               </div>
 
-              {/* Prompt Input with Voice */}
               <div className="relative group">
                 <textarea
                   value={prompt}
@@ -506,7 +553,6 @@ const App: React.FC = () => {
                 )}
               </div>
 
-              {/* Action Button & API Check */}
               {mode === AppMode.HOLO_3D && !apiKeyVerified ? (
                  <Button
                    onClick={handleUnlock3D}
@@ -534,363 +580,261 @@ const App: React.FC = () => {
                   )}
                 </Button>
               )}
-               {error && (
-                  <div className="p-3 bg-red-950/50 border border-red-900/50 rounded-lg text-red-200 text-xs flex items-start gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mt-0.5 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
-                      <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                    </svg>
-                    {error}
-                  </div>
-                )}
-            </div>
-            
-             {/* Quick Styles (Only 2D for now) */}
-             {mode === AppMode.SCAN_2D && (
-              <div className="bg-slate-900/50 rounded-2xl border border-slate-800 p-5 shadow-xl">
-                 <h2 className="text-sm font-bold text-slate-500 uppercase tracking-widest mb-3">Processing Presets</h2>
-                  <div className="grid grid-cols-2 gap-2">
+
+              {mode !== AppMode.HOLO_3D && (
+                <div className="space-y-2 pt-2 border-t border-slate-700/50">
+                  <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Quick Filters</p>
+                  <div className="flex flex-wrap gap-2">
                     {QUICK_STYLES.map((style) => (
                       <button
                         key={style.label}
                         onClick={() => applyStyle(style)}
-                        className="px-3 py-2 bg-slate-800/50 hover:bg-cyan-900/30 border border-slate-700 hover:border-cyan-700/50 rounded-lg text-xs text-left text-slate-300 hover:text-cyan-200 transition-all duration-200 active:scale-95 group"
+                        className="text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-400 px-3 py-1.5 rounded-lg border border-slate-700 transition-colors"
                       >
-                        <span className="block font-medium group-hover:translate-x-1 transition-transform">{style.label}</span>
+                        {style.label}
                       </button>
                     ))}
                   </div>
-              </div>
-             )}
-             
-             {/* AI Assistant Toggle */}
-             {generatedImageUrl && (
-               <button 
-                 onClick={() => setShowChat(!showChat)}
-                 className="w-full bg-indigo-900/30 hover:bg-indigo-900/50 border border-indigo-500/30 p-4 rounded-xl flex items-center justify-between group transition-all"
-               >
-                 <div className="flex items-center gap-3">
-                   <div className="p-2 bg-indigo-500/20 rounded-lg text-indigo-400 group-hover:text-white transition-colors">
-                     <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                       <path fillRule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clipRule="evenodd" />
-                     </svg>
-                   </div>
-                   <div className="text-left">
-                     <div className="text-sm font-bold text-indigo-300 group-hover:text-white">Ask Diagnostic AI</div>
-                     <div className="text-[10px] text-indigo-400/70">Chat about this scan</div>
-                   </div>
-                 </div>
-                 <div className={`transform transition-transform ${showChat ? 'rotate-180' : ''}`}>
-                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-indigo-400" viewBox="0 0 20 20" fill="currentColor">
-                     <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-                   </svg>
-                 </div>
-               </button>
-             )}
-             
-             {showChat && generatedImageUrl && (
-                <div className="animate-fade-in-down">
-                  <MedicalChat generatedImageBase64={generatedImageUrl} mimeType="image/png" />
                 </div>
-             )}
+              )}
+            </div>
+
+            <div className="bg-slate-900/50 rounded-2xl border border-purple-500/20 p-5 shadow-xl">
+               <DifferentialPanel diagnoses={differentialDiagnoses} isLoading={isAnalyzing} />
+            </div>
+            
           </div>
 
-          {/* Right Column: Visualization & Data (8 cols) */}
-          <div className="lg:col-span-8 space-y-6 print:col-span-12 print:space-y-4">
-             <div className="flex items-center justify-between print:hidden">
-                <h2 className="text-sm font-bold text-cyan-400 uppercase tracking-widest flex items-center gap-2">
-                  <span className="w-2 h-2 bg-cyan-500 rounded-sm"></span>
-                  03. Visualization Output
-                </h2>
-                
-                <div className="flex flex-wrap gap-2 justify-end">
-                  {/* Patient Education Mode Toggle */}
-                  {generatedImageUrl && mode === AppMode.SCAN_2D && (
-                     <div className="bg-slate-800 rounded-lg p-1 border border-slate-700 flex mr-2">
+          <div className="lg:col-span-8 space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-4 print:hidden">
+               <h2 className="text-sm font-bold text-cyan-400 uppercase tracking-widest flex items-center gap-2">
+                <span className="w-2 h-2 bg-cyan-500 rounded-sm"></span>
+                03. Visualization Output
+              </h2>
+              
+              <div className="flex items-center gap-2">
+                {generatedImageUrl && mode !== AppMode.HOLO_3D && (
+                   <>
+                     <div className="flex bg-slate-800 rounded-lg p-1 border border-slate-700">
                         <button 
                            onClick={() => setViewMode('GENERATED')}
-                           className={`px-3 py-1 text-[10px] font-bold uppercase rounded ${viewMode === 'GENERATED' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                           className={`px-3 py-1.5 rounded text-xs font-bold uppercase ${viewMode === 'GENERATED' ? 'bg-cyan-600 text-white' : 'text-slate-400 hover:text-white'}`}
                         >
                            Pathology
                         </button>
                         <button 
                            onClick={handlePatientEducationMode}
-                           className={`px-3 py-1 text-[10px] font-bold uppercase rounded flex items-center gap-1 ${viewMode === 'HEALTHY' ? 'bg-green-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                           className={`px-3 py-1.5 rounded text-xs font-bold uppercase ${viewMode === 'HEALTHY' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}
                         >
-                           {viewMode !== 'HEALTHY' && !healthyImageUrl && status === AppStatus.LOADING ? (
-                             <span className="w-2 h-2 rounded-full bg-green-400 animate-ping"></span>
-                           ) : (
-                             <span>Healthy Ref</span>
-                           )}
+                           Healthy Ref
                         </button>
                      </div>
-                  )}
-
-                  {/* Smart Labels Toggle (Coordinates) */}
-                   {generatedImageUrl && mode === AppMode.SCAN_2D && viewMode === 'GENERATED' && (
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        setShowSmartLabels(!showSmartLabels);
-                        setIsAnnotating(false);
-                      }}
-                       className={`!py-1.5 !px-4 !text-xs font-mono uppercase tracking-wider flex items-center gap-2 ${showSmartLabels ? 'bg-cyan-900/50 border-cyan-500 text-cyan-200' : 'border-slate-600 text-slate-400'}`}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                      </svg>
-                      {showSmartLabels ? 'Hide Labels' : 'Smart Labels'}
-                    </Button>
-                  )}
-
-                  {/* Manual Annotation Toggle */}
-                  {generatedImageUrl && mode === AppMode.SCAN_2D && (
-                    <Button 
-                      variant="outline"
-                      onClick={() => {
-                        setIsAnnotating(!isAnnotating);
-                        setShowSmartLabels(false);
-                      }}
-                      className={`!py-1.5 !px-4 !text-xs font-mono uppercase tracking-wider flex items-center gap-2 ${isAnnotating ? 'bg-cyan-900/50 border-cyan-500 text-cyan-200' : 'border-slate-600 text-slate-400'}`}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                      </svg>
-                      {isAnnotating ? 'Close Draw' : 'Draw'}
-                    </Button>
-                  )}
-                  
-                  {/* Action Buttons Group */}
-                   {generatedImageUrl && mode === AppMode.SCAN_2D && (
-                      <div className="flex gap-2">
-                        {/* PubMed Button */}
-                        <Button
-                           variant="outline"
-                           onClick={handlePerformResearch}
-                           className="!py-1.5 !px-4 !text-xs font-mono uppercase tracking-wider flex items-center gap-2 border-purple-500/30 text-purple-300 hover:bg-purple-900/50"
-                        >
-                           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                           </svg>
-                           Research
-                        </Button>
-                        <Button
-                           variant="outline"
-                           onClick={handleGenerateSurgicalPlan}
-                           className="!py-1.5 !px-4 !text-xs font-mono uppercase tracking-wider flex items-center gap-2 border-emerald-500/30 text-emerald-300 hover:bg-emerald-900/50"
-                        >
-                           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                           </svg>
-                           Plan
-                        </Button>
-                        <Button
-                           variant="outline"
-                           onClick={handleGenerateReport}
-                           className="!py-1.5 !px-4 !text-xs font-mono uppercase tracking-wider flex items-center gap-2 border-indigo-500/30 text-indigo-300 hover:bg-indigo-900/50"
-                        >
-                           <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                           </svg>
-                           Report
-                        </Button>
-                      </div>
-                   )}
-                </div>
-             </div>
-            
-            <div className="grid lg:grid-cols-3 gap-6 print:block">
-              {/* Main Visualizer (Takes up 2/3) */}
-              <div className="lg:col-span-2 print:mb-8">
+                     
+                     <div className="w-px h-6 bg-slate-700 mx-1"></div>
+                   </>
+                )}
                 
-                {generatedImageUrl && mode === AppMode.SCAN_2D && !isAnnotating && !showSmartLabels && (
-                   <div className="print:hidden">
-                      <ImageControls 
-                        adjustments={adjustments} 
-                        setAdjustments={setAdjustments} 
-                        activeTool={activeTool}
-                        setActiveTool={setActiveTool}
-                      />
-                   </div>
+                {mode !== AppMode.HOLO_3D && (
+                  <button 
+                    onClick={() => setMode(mode === AppMode.SCAN_2D ? AppMode.SYNC_COMPARE : AppMode.SCAN_2D)}
+                    disabled={!originalImage || !generatedImageUrl}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all text-xs font-bold uppercase ${mode === AppMode.SYNC_COMPARE ? 'bg-indigo-500/20 border-indigo-500 text-indigo-400' : 'bg-slate-800 border-slate-600 text-slate-400 hover:border-indigo-500/50'}`}
+                  >
+                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" /></svg>
+                     Compare
+                  </button>
                 )}
 
-                <div 
-                  className={`
-                    relative min-h-[500px] h-full rounded-2xl border bg-black/40 overflow-hidden shadow-2xl transition-all duration-500 flex flex-col
-                    ${(generatedImageUrl || generatedVideoUrl) ? 'border-cyan-500/50 shadow-[0_0_30px_rgba(6,182,212,0.15)]' : 'border-slate-800 border-dashed'}
-                    print:border-none print:shadow-none print:bg-white print:min-h-0
-                    ${activeTool === 'WINDOW_LEVEL' ? 'cursor-crosshair' : ''}
-                  `}
-                  onMouseDown={handleMouseDown}
-                  onMouseMove={handleMouseMove}
-                  onMouseUp={handleMouseUp}
-                  onMouseLeave={handleMouseUp}
+                <button 
+                   onClick={() => setShowSmartLabels(!showSmartLabels)}
+                   disabled={!structures.length}
+                   className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border transition-all text-xs font-bold uppercase ${showSmartLabels ? 'bg-cyan-500/20 border-cyan-500 text-cyan-400' : 'bg-slate-800 border-slate-600 text-slate-400 hover:border-cyan-500/50'}`}
                 >
-                  
-                  {/* Empty State */}
-                  {!generatedImageUrl && !generatedVideoUrl && status !== AppStatus.LOADING && (
-                    <div className="flex-1 flex flex-col items-center justify-center p-8 text-center print:hidden">
-                        <div className="w-20 h-20 rounded-full bg-slate-800/50 border border-slate-700 flex items-center justify-center mb-6">
-                          <svg className="w-10 h-10 text-slate-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                          </svg>
-                        </div>
-                        <h3 className="text-slate-300 font-tech text-lg mb-2 tracking-wide">AWAITING INPUT</h3>
-                        <p className="text-slate-500 text-sm max-w-xs mx-auto">Upload source material to begin anatomical reconstruction.</p>
-                    </div>
-                  )}
+                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                   Labels (L)
+                </button>
+                <button 
+                   onClick={() => setIsAnnotating(true)}
+                   disabled={!generatedImageUrl}
+                   className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-600 bg-slate-800 text-slate-400 hover:text-white hover:border-slate-500 transition-all text-xs font-bold uppercase"
+                >
+                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                   Draw (D)
+                </button>
 
-                  {/* Loading State with Scanner */}
-                  {status === AppStatus.LOADING && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 z-20">
-                      <ScanningOverlay />
-                      {mode === AppMode.HOLO_3D && (
-                        <p className="mt-8 text-cyan-400 font-mono text-xs animate-pulse">GENERATING VOLUMETRIC DATA... (THIS MAY TAKE A MOMENT)</p>
-                      )}
-                      {viewMode === 'HEALTHY' && !healthyImageUrl && (
-                        <p className="mt-8 text-green-400 font-mono text-xs animate-pulse">SYNTHESIZING HEALTHY REFERENCE MODEL...</p>
-                      )}
-                      {viewMode === 'PROGRESSION' && !progressionUrl && (
-                        <p className="mt-8 text-cyan-400 font-mono text-xs animate-pulse">SIMULATING DISEASE PROGRESSION...</p>
-                      )}
-                    </div>
-                  )}
+                <div className="w-px h-6 bg-slate-700 mx-1"></div>
 
-                  {/* Success State: 2D */}
-                  {generatedImageUrl && mode === AppMode.SCAN_2D && originalImage && (
-                    <div className="flex-1 relative print:block h-full">
-                      <div className="print:hidden h-full">
-                        {isAnnotating ? (
-                           <AnnotationCanvas 
-                              imageUrl={getActiveDisplayImage()} 
-                              onSave={(newUrl) => {
-                                setGeneratedImageUrl(newUrl);
-                                setIsAnnotating(false);
-                              }}
-                              onCancel={() => setIsAnnotating(false)}
-                           />
-                        ) : activeTool === 'MAGNIFIER' ? (
-                           <Magnifier imgUrl={getActiveDisplayImage()} />
-                        ) : showSmartLabels ? (
-                           <div className="relative w-full h-full">
-                              <SmartLabelOverlay 
-                                 structures={structures} 
-                                 imageUrl={generatedImageUrl} 
-                                 focusedIndex={focusedStructureIndex}
-                              />
-                           </div>
-                        ) : (
-                           <div className="relative w-full h-full">
-                              <ImageCompare 
-                                beforeImage={originalImage.previewUrl}
-                                afterImage={getActiveDisplayImage()}
-                                adjustments={adjustments}
-                              />
-                              
-                              {/* Heatmap Overlay */}
-                              {activeTool === 'HEATMAP' && heatmapUrl && (
-                                <img 
-                                  src={heatmapUrl} 
-                                  className="absolute inset-0 w-full h-full object-contain pointer-events-none mix-blend-screen opacity-90 animate-pulse"
-                                  alt="Heatmap"
-                                />
-                              )}
-                           </div>
-                        )}
-                        
-                        {/* Overlay Spotlight if interaction comes from List and NOT in smart label mode (because smart label mode already renders them) */}
-                        {!showSmartLabels && focusedStructureIndex !== null && (
-                          <div className="absolute inset-0 pointer-events-none z-10">
-                             <SmartLabelOverlay 
-                               structures={structures} 
-                               imageUrl={generatedImageUrl} 
-                               focusedIndex={focusedStructureIndex}
-                            />
-                          </div>
-                        )}
-                      </div>
-                      
-                      {/* Print View: Show Side by Side */}
-                      <div className="hidden print:grid grid-cols-2 gap-4">
-                         <div>
-                            <p className="text-xs font-bold uppercase mb-2 text-gray-500">Original Source</p>
-                            <img src={originalImage.previewUrl} className="w-full rounded border border-gray-200" alt="Original" />
-                         </div>
-                         <div>
-                            <p className="text-xs font-bold uppercase mb-2 text-cyan-600">MediGen Analysis</p>
-                            <img src={generatedImageUrl} className="w-full rounded border border-gray-200" alt="Generated" />
-                         </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Success State: 3D Video */}
-                  {generatedVideoUrl && mode === AppMode.HOLO_3D && (
-                     <div className="flex-1 relative w-full h-full min-h-[500px]">
-                        <HoloViewer videoUrl={generatedVideoUrl} />
-                     </div>
-                  )}
-                  
-                  {/* Status Footer inside Image Area */}
-                  <div className="h-10 bg-slate-900 border-t border-slate-800 flex items-center justify-between px-4 text-[10px] text-slate-500 font-mono uppercase print:hidden">
-                     <span>Res: {mode === AppMode.HOLO_3D ? '720p HQ' : '1024x1024'}</span>
-                     <span>Tool: {activeTool}</span>
-                     <span>Mode: {viewMode === 'HEALTHY' ? 'PATIENT EDUCATION (SYNTHETIC)' : viewMode === 'PROGRESSION' ? 'PREDICTIVE PROGRESSION' : (mode === AppMode.HOLO_3D ? 'Volumetric VR' : (isAnnotating ? 'Drawing Tool' : (showSmartLabels ? 'Smart Labels' : 'Comparison')))}</span>
-                  </div>
-                </div>
-                
-                {/* Timeline Scrubber (Only show if we are in predictive/standard mode) */}
-                {generatedImageUrl && mode === AppMode.SCAN_2D && (
-                   <div className="mt-4 print:hidden">
-                      <TimelineSlider 
-                        activeTimeframe={activeTimeframe} 
-                        onChange={handleTimeframeChange}
-                        isLoading={status === AppStatus.LOADING}
-                      />
-                   </div>
-                )}
-              </div>
-
-              {/* Data Panel (Takes up 1/3) */}
-              <div className="lg:col-span-1 flex flex-col gap-4">
-                  {/* Structure List */}
-                  <StructureAnalysis 
-                    structures={structures} 
-                    isLoading={isAnalyzing} 
-                    onHoverStructure={(idx) => setFocusedStructureIndex(idx)}
-                  />
-                  
-                  {/* Differential Diagnosis (Dr. House Mode) */}
-                  <DifferentialPanel diagnoses={differentialDiagnoses} isLoading={isAnalyzing && differentialDiagnoses.length === 0} />
-                  
-                  {/* Placeholder for when no analysis yet */}
-                  {!isAnalyzing && structures.length === 0 && (
-                     <div className="flex-1 rounded-2xl border border-slate-800 bg-slate-900/30 p-6 flex flex-col items-center justify-center text-center opacity-50 print:hidden">
-                        <svg className="w-12 h-12 text-slate-700 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                        </svg>
-                        <p className="text-xs text-slate-500 uppercase tracking-widest">No Data Available</p>
-                     </div>
-                  )}
+                <button 
+                  onClick={handleGenerateSurgicalPlan}
+                  disabled={!generatedImageUrl}
+                  className="px-3 py-1.5 rounded-lg border border-teal-500/30 bg-teal-900/20 text-teal-400 hover:bg-teal-900/40 text-xs font-bold uppercase flex items-center gap-2"
+                >
+                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" /></svg>
+                   Surgery
+                </button>
+                <button 
+                   onClick={handleGenerateReport}
+                   disabled={!generatedImageUrl}
+                   className="px-3 py-1.5 rounded-lg border border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700 text-xs font-bold uppercase flex items-center gap-2"
+                >
+                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                   Report
+                </button>
+                <button 
+                   onClick={handlePerformResearch}
+                   disabled={!generatedImageUrl}
+                   className="px-3 py-1.5 rounded-lg border border-blue-500/30 bg-blue-900/20 text-blue-400 hover:bg-blue-900/40 text-xs font-bold uppercase flex items-center gap-2"
+                >
+                   <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                   PubMed
+                </button>
               </div>
             </div>
+
+            {error && (
+              <div className="bg-red-500/10 border border-red-500/50 rounded-xl p-4 flex items-center gap-3 animate-fade-in-down print:hidden">
+                <svg className="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                <p className="text-red-400 text-sm">{error}</p>
+              </div>
+            )}
+
+            {mode !== AppMode.HOLO_3D && generatedImageUrl && !isAnnotating && mode !== AppMode.SYNC_COMPARE && (
+              <ImageControls 
+                 adjustments={adjustments} 
+                 setAdjustments={setAdjustments} 
+                 activeTool={activeTool}
+                 setActiveTool={setActiveTool}
+              />
+            )}
+
+            <div 
+               className={`
+                 relative bg-black rounded-2xl overflow-hidden shadow-2xl border border-slate-700 
+                 ${mode === AppMode.HOLO_3D ? 'aspect-video' : 'aspect-square md:aspect-[4/3]'} 
+                 group print:border-none print:shadow-none
+                 ${activeTool === 'WINDOW_LEVEL' ? 'cursor-crosshair' : ''}
+               `}
+               onMouseDown={handleMouseDown}
+               onMouseMove={handleMouseMove}
+               onMouseUp={handleMouseUp}
+               onMouseLeave={handleMouseUp}
+            >
+              {status === AppStatus.LOADING && <ScanningOverlay />}
+              
+              {isAnnotating && generatedImageUrl ? (
+                <AnnotationCanvas 
+                  imageUrl={getActiveDisplayImage()}
+                  onSave={(annotatedUrl) => {
+                     setGeneratedImageUrl(annotatedUrl);
+                     setIsAnnotating(false);
+                  }}
+                  onCancel={() => setIsAnnotating(false)}
+                />
+              ) : mode === AppMode.HOLO_3D && generatedVideoUrl ? (
+                <HoloViewer videoUrl={generatedVideoUrl} />
+              ) : mode === AppMode.SYNC_COMPARE && originalImage && generatedImageUrl ? (
+                <SynchronizedCompare 
+                   imageLeft={originalImage.previewUrl}
+                   imageRight={getActiveDisplayImage()}
+                   labelLeft="Input Source"
+                   labelRight="MediGen Analysis"
+                />
+              ) : generatedImageUrl && originalImage ? (
+                <>
+                  <div className="absolute inset-0 z-10">
+                     <ImageCompare 
+                        beforeImage={originalImage.previewUrl} 
+                        afterImage={getActiveDisplayImage()} 
+                        adjustments={adjustments}
+                     />
+                  </div>
+
+                  {showSmartLabels && (
+                    <SmartLabelOverlay 
+                       structures={structures} 
+                       imageUrl={generatedImageUrl} 
+                       focusedIndex={focusedStructureIndex}
+                    />
+                  )}
+                  
+                  {activeTool === 'MAGNIFIER' && (
+                    <div className="absolute inset-0 z-30 pointer-events-none">
+                       <Magnifier imgUrl={getActiveDisplayImage()} />
+                    </div>
+                  )}
+
+                  {activeTool === 'HEATMAP' && heatmapUrl && (
+                    <div className="absolute inset-0 z-20 mix-blend-screen pointer-events-none opacity-80 animate-pulse">
+                      <img src={heatmapUrl} className="w-full h-full object-contain" alt="Heatmap" />
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-full text-slate-600 print:hidden">
+                  <div className="w-16 h-16 rounded-full bg-slate-800 flex items-center justify-center mb-4">
+                     <svg className="w-8 h-8 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                  </div>
+                  <p className="text-sm uppercase tracking-widest font-bold">Awaiting Input Scan</p>
+                </div>
+              )}
+            </div>
+
+            {mode === AppMode.SCAN_2D && generatedImageUrl && (
+               <TimelineSlider 
+                 activeTimeframe={activeTimeframe} 
+                 onChange={handleTimeframeChange}
+                 isLoading={status === AppStatus.LOADING}
+               />
+            )}
+
+            {generatedImageUrl && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 print:hidden">
+                 <StructureAnalysis 
+                   structures={structures} 
+                   isLoading={isAnalyzing} 
+                   onHoverStructure={setFocusedStructureIndex}
+                   onAskAbout={handleAskAboutStructure}
+                 />
+                 
+                 <div className="relative">
+                   <button 
+                     onClick={() => setShowChat(!showChat)}
+                     className="w-full bg-slate-900/50 border border-cyan-500/30 p-4 rounded-xl flex items-center justify-between hover:bg-slate-800 transition-colors"
+                   >
+                      <span className="flex items-center gap-3">
+                         <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                         <span className="text-cyan-400 font-bold text-sm tracking-wide">AI Diagnostic Assistant</span>
+                      </span>
+                      <svg xmlns="http://www.w3.org/2000/svg" className={`h-5 w-5 text-slate-400 transition-transform ${showChat ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      </svg>
+                   </button>
+                   
+                   {showChat && (
+                     <div className="absolute bottom-full left-0 right-0 mb-4 animate-fade-in-down z-30">
+                       <MedicalChat 
+                          generatedImageBase64={generatedImageUrl} 
+                          mimeType="image/png" 
+                          initialMessage={initialChatMessage}
+                          // Pass context from Research and Reports
+                          context={getChatContext()}
+                       />
+                     </div>
+                   )}
+                 </div>
+              </div>
+            )}
           </div>
         </div>
-
-        {/* Modals & Panels */}
-        {report && (
-          <RadiologyReport report={report} onClose={() => setReport(null)} />
-        )}
-
-        {surgicalPlan && (
-          <SurgicalPlan plan={surgicalPlan} onClose={() => setSurgicalPlan(null)} />
-        )}
-        
-        {research && (
-          <ResearchPanel research={research} onClose={() => setResearch(null)} />
-        )}
-
       </main>
+
+      {report && <RadiologyReport report={report} onClose={() => setReport(null)} />}
+      {surgicalPlan && <SurgicalPlan plan={surgicalPlan} onClose={() => setSurgicalPlan(null)} />}
+      {research && <ResearchPanel research={research} onClose={() => setResearch(null)} onRefineSearch={handleRefineResearch} isLoading={isAnalyzing} />}
+      
+      <footer className="max-w-7xl mx-auto px-4 py-6 text-center text-[10px] text-slate-600 font-mono uppercase tracking-widest print:hidden">
+         MediGen AI v2.5 • Powered by Google Gemini Flash & Veo • FDA/HIPAA Compliance Mode: TEST
+      </footer>
     </div>
   );
 };

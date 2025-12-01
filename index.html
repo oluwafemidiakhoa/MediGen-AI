@@ -87,11 +87,13 @@
 
       @media print {
         body {
-          background: white;
-          color: black;
+          background: white !important;
+          color: black !important;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
         }
         .no-print {
-          display: none;
+          display: none !important;
         }
         /* Improve contrast for print */
         * {

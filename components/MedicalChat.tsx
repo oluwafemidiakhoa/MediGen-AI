@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatMessage } from '../types';
 import { sendChatMessage } from '../services/geminiService';
@@ -5,9 +6,11 @@ import { sendChatMessage } from '../services/geminiService';
 interface MedicalChatProps {
   generatedImageBase64: string;
   mimeType: string;
+  initialMessage?: string;
+  context?: string;
 }
 
-export const MedicalChat: React.FC<MedicalChatProps> = ({ generatedImageBase64, mimeType }) => {
+export const MedicalChat: React.FC<MedicalChatProps> = ({ generatedImageBase64, mimeType, initialMessage, context }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: '1',
@@ -20,19 +23,27 @@ export const MedicalChat: React.FC<MedicalChatProps> = ({ generatedImageBase64, 
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Auto-trigger initial message if provided
+  useEffect(() => {
+    if (initialMessage && messages.length === 1) {
+      handleSend(initialMessage);
+    }
+  }, [initialMessage]);
+
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
 
-  const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+  const handleSend = async (textOverride?: string) => {
+    const textToSend = textOverride || input;
+    if (!textToSend.trim() || isLoading) return;
 
     const userMsg: ChatMessage = {
       id: Date.now().toString(),
       role: 'user',
-      text: input,
+      text: textToSend,
       timestamp: new Date()
     };
 
@@ -41,7 +52,7 @@ export const MedicalChat: React.FC<MedicalChatProps> = ({ generatedImageBase64, 
     setIsLoading(true);
 
     try {
-      const responseText = await sendChatMessage(messages, input, generatedImageBase64, mimeType);
+      const responseText = await sendChatMessage(messages, textToSend, generatedImageBase64, mimeType, context);
       
       const botMsg: ChatMessage = {
         id: (Date.now() + 1).toString(),
@@ -112,7 +123,7 @@ export const MedicalChat: React.FC<MedicalChatProps> = ({ generatedImageBase64, 
             className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:border-cyan-500 outline-none"
           />
           <button 
-            onClick={handleSend}
+            onClick={() => handleSend()}
             disabled={isLoading || !input.trim()}
             className="bg-cyan-600 hover:bg-cyan-500 text-white p-2 rounded-lg disabled:opacity-50 transition-colors"
           >

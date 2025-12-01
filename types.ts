@@ -22,7 +22,8 @@ export interface ImageAdjustments {
 
 export enum AppMode {
   SCAN_2D = 'SCAN_2D',
-  HOLO_3D = 'HOLO_3D'
+  HOLO_3D = 'HOLO_3D',
+  SYNC_COMPARE = 'SYNC_COMPARE'
 }
 
 export type AnnotationToolType = 'PEN' | 'TEXT' | 'ERASER';
@@ -83,6 +84,7 @@ export interface RadiologyReport {
   findings: string[];
   impression: string;
   recommendations: string[];
+  imageUrl?: string; // New: Link the image to the report
 }
 
 export interface SurgicalPlan {
@@ -95,6 +97,7 @@ export interface SurgicalPlan {
 
 export interface MedicalResearch {
   topic: string;
+  searchQuery?: string; // The standardized term used for APIs
   summary: string;
   citations: {
     title: string;
@@ -102,6 +105,43 @@ export interface MedicalResearch {
     url: string;
   }[];
   treatmentProtocols: string[];
+  // New External Data
+  clinicalTrials?: ClinicalTrial[];
+  patientResources?: MedlinePlusResult[];
+  drugLabels?: DrugLabel[];
+  pubMedPapers?: PubMedPaper[];
+}
+
+export interface PubMedPaper {
+  uid: string;
+  title: string;
+  source: string;
+  pubdate: string;
+  authors: string[];
+  url: string;
+}
+
+export interface ClinicalTrial {
+  nctId: string;
+  title: string;
+  status: string;
+  phase: string;
+  conditions: string[];
+  url: string;
+}
+
+export interface MedlinePlusResult {
+  title: string;
+  summary: string;
+  url: string;
+}
+
+export interface DrugLabel {
+  brand_name: string;
+  generic_name: string;
+  substance_name: string;
+  pharm_class_epc: string;
+  manufacturer_name: string;
 }
 
 export interface DifferentialDiagnosis {

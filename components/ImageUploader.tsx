@@ -1,12 +1,14 @@
+
 import React, { useRef, useState } from 'react';
 import { ImageFile } from '../types';
 
 interface ImageUploaderProps {
   onImageSelect: (image: ImageFile) => void;
   selectedImage: ImageFile | null;
+  onLoadDemo?: () => void; // New prop
 }
 
-export const ImageUploader: React.FC<ImageUploaderProps> = ({ onImageSelect, selectedImage }) => {
+export const ImageUploader: React.FC<ImageUploaderProps> = ({ onImageSelect, selectedImage, onLoadDemo }) => {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -46,7 +48,7 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ onImageSelect, sel
   };
 
   return (
-    <div className="w-full">
+    <div className="w-full space-y-3">
       <input
         type="file"
         accept="image/*"
@@ -119,6 +121,18 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({ onImageSelect, sel
              </div>
           </div>
         </div>
+      )}
+
+      {!selectedImage && onLoadDemo && (
+         <button 
+            onClick={(e) => {
+              e.stopPropagation();
+              onLoadDemo();
+            }}
+            className="w-full py-3 rounded-xl border border-dashed border-cyan-500/30 bg-cyan-900/10 hover:bg-cyan-900/20 text-cyan-400 text-xs font-bold uppercase tracking-widest transition-all hover:border-cyan-500/60"
+         >
+            Load Demo Case (Chest X-Ray)
+         </button>
       )}
     </div>
   );

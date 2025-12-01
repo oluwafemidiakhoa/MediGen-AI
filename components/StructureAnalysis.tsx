@@ -6,9 +6,10 @@ interface StructureAnalysisProps {
   structures: AnatomicalStructure[];
   isLoading: boolean;
   onHoverStructure?: (index: number | null) => void;
+  onAskAbout?: (structureName: string) => void;
 }
 
-export const StructureAnalysis: React.FC<StructureAnalysisProps> = ({ structures, isLoading, onHoverStructure }) => {
+export const StructureAnalysis: React.FC<StructureAnalysisProps> = ({ structures, isLoading, onHoverStructure, onAskAbout }) => {
   if (isLoading) {
     return (
       <div className="h-full flex flex-col items-center justify-center p-8 space-y-4 border border-cyan-500/20 rounded-2xl bg-slate-900/50 backdrop-blur-sm min-h-[300px]">
@@ -34,17 +35,27 @@ export const StructureAnalysis: React.FC<StructureAnalysisProps> = ({ structures
         {structures.map((item, idx) => (
           <div 
             key={idx} 
-            className="group relative bg-slate-800/50 border border-slate-700 hover:border-cyan-500/50 rounded-lg p-3 transition-all duration-300 hover:bg-slate-800 cursor-pointer"
+            className="group relative bg-slate-800/50 border border-slate-700 hover:border-cyan-500/50 rounded-lg p-3 transition-all duration-300 hover:bg-slate-800"
             onMouseEnter={() => onHoverStructure && onHoverStructure(idx)}
             onMouseLeave={() => onHoverStructure && onHoverStructure(null)}
           >
             <div className="flex justify-between items-start mb-1">
               <span className="text-cyan-300 font-bold text-sm tracking-wide">{item.name}</span>
-              {item.confidence && (
-                <span className="text-[10px] bg-cyan-900/50 text-cyan-400 px-1.5 py-0.5 rounded border border-cyan-500/20">
-                  {item.confidence}% CONF
-                </span>
-              )}
+              <div className="flex gap-2">
+                 {onAskAbout && (
+                   <button 
+                     onClick={(e) => { e.stopPropagation(); onAskAbout(item.name); }}
+                     className="text-[10px] bg-slate-700 hover:bg-cyan-700 text-slate-300 hover:text-white px-2 py-0.5 rounded transition-colors opacity-0 group-hover:opacity-100"
+                   >
+                     Ask AI
+                   </button>
+                 )}
+                 {item.confidence && (
+                   <span className="text-[10px] bg-cyan-900/50 text-cyan-400 px-1.5 py-0.5 rounded border border-cyan-500/20">
+                     {item.confidence}%
+                   </span>
+                 )}
+              </div>
             </div>
             <p className="text-slate-400 text-xs leading-relaxed mb-2">{item.description}</p>
             <div className="flex items-center gap-2 mt-2 pt-2 border-t border-slate-700/50">
